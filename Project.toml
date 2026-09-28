@@ -1,7 +1,7 @@
-name = "NGS"
+name = "NonGaussianDMRG"
 uuid = "336ed68f-09f0-4229-9e73-67c9b8c199e7"
 authors = ["JP Mendonca <jpedromend@gmail.com>"]
-version = "0.3.3"
+version = "0.4.0"
 
 [deps]
 ITensorMPS = "0d1a4710-d33b-49a5-8f18-73bdf49b47e2"
