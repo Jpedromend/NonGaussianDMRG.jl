@@ -6,65 +6,53 @@
 Executes the optimization loop from scratch (Full Cold Start).
 Initializes a random MPS and random variational guesses, then routes to the Warm Start.
 """
-function solve_ngs(model::SpinBosonSystem; backend=:dmrg, maxdim_init=10, kwargs...)
-    if backend != :dmrg
-        error("Unsupported solver backend: $(backend).")
-    end
+function solve_ngs(model::SpinBosonSystem; seed=nothing, maxdim_init=10, kwargs...)
+    seed === nothing || Random.seed!(seed)
 
     sites = siteinds("S=1/2", model.N)
     psi_init = randomMPS(sites; linkdims=maxdim_init)
     
-    # Deterministic random guesses for the non-Gaussian parameters
+    # Random guesses for the non-Gaussian parameters
     xi_guess = rand(0.0:0.01:0.1)
     lambda_guess = rand(0.0:0.1:0.5)
     
     state_init = NGSState(psi_init, HomogeneousNGS(xi_guess, lambda_guess))
 
-    return solve_ngs(model, state_init; backend=backend, kwargs...)
+    return solve_ngs(model, state_init; kwargs...)
 end
 
 """
 Executes the standard Gaussian State (GS) loop from scratch. 
 """
-function solve_ngs(model::SpinBosonSystem, ::GS; backend=:dmrg, maxdim_init=10, kwargs...)
-    if backend != :dmrg
-        error("Unsupported solver backend: $(backend).")
-    end
+function solve_ngs(model::SpinBosonSystem, ::GS; seed=nothing, maxdim_init=10, kwargs...)
+    seed === nothing || Random.seed!(seed)
 
     sites = siteinds("S=1/2", model.N)
     psi_init = randomMPS(sites; linkdims=maxdim_init)
     state_init = NGSState(psi_init, GS())
 
-    return solve_ngs(model, state_init; backend=backend, kwargs...)
+    return solve_ngs(model, state_init; kwargs...)
 end
 
 """
 Executes the optimization loop from a pre-existing state (Warm Start).
 Guarantees index matching by extracting sites directly from the provided MPS.
 """
-function solve_ngs(model::SpinBosonSystem, state_init::NGSState{HomogeneousNGS}; backend=:dmrg, kwargs...)
-    if backend != :dmrg
-        error("Unsupported solver backend: $(backend).")
-    end
-
+function solve_ngs(model::SpinBosonSystem, state_init::NGSState{HomogeneousNGS}; kwargs...)
     # 1. Guarantee index matching
     sites = siteinds(state_init.psi_spin)
 
     # 2. Build mathematical graph representations (lightweight operation)
     base_ops = build_base_operators(model) 
 
-    return _solve(model, state_init, DMRGBackend(); sites=sites, base_ops=base_ops, kwargs...)
+    return _solve(model, state_init; sites=sites, base_ops=base_ops, kwargs...)
 end
 
 """
 Executes the optimization loop from a pre-existing GS state (Warm Start for Parameter Sweeps).
 Forces optimize_params=false to prevent accidental non-Gaussian entanglement.
 """
-function solve_ngs(model::SpinBosonSystem, state_init::NGSState{GS}; backend=:dmrg, kwargs...)
-    if backend != :dmrg
-        error("Unsupported solver backend: $(backend).")
-    end
-
+function solve_ngs(model::SpinBosonSystem, state_init::NGSState{GS}; kwargs...)
     sites = siteinds(state_init.psi_spin)
     base_ops = build_base_operators(model) 
 
@@ -74,11 +62,11 @@ function solve_ngs(model::SpinBosonSystem, state_init::NGSState{GS}; backend=:dm
     return_stats = get(kwargs, :return_stats, false)
 
     if return_stats
-        E0, mock_ngs, stats = _solve(model, mock_state, DMRGBackend(); 
+        E0, mock_ngs, stats = _solve(model, mock_state;
                                      optimize_params=false, sites=sites, base_ops=base_ops, kwargs...)
         return E0, NGSState(mock_ngs.psi_spin, GS()), stats
     else
-        E0, mock_ngs = _solve(model, mock_state, DMRGBackend(); 
+        E0, mock_ngs = _solve(model, mock_state;
                               optimize_params=false, sites=sites, base_ops=base_ops, kwargs...)
         return E0, NGSState(mock_ngs.psi_spin, GS())
     end
@@ -89,10 +77,10 @@ end
 # --- Internal Engine ---
 
 """
-Unified backend engine for the self-consistent protocol using DMRG.
+Engine for the self-consistent protocol using DMRG.
 Absorbs standard ITensors arguments (nsweeps, maxdim, observer, etc.) via dmrg_kwargs.
 """
-function _solve(model::SpinBosonSystem, state_init::NGSState{HomogeneousNGS}, ::DMRGBackend;
+function _solve(model::SpinBosonSystem, state_init::NGSState{HomogeneousNGS};
                 sites,
                 base_ops,
                 optimize_params=true,
@@ -105,12 +93,7 @@ function _solve(model::SpinBosonSystem, state_init::NGSState{HomogeneousNGS}, ::
                 dmrg_kwargs...) 
 
     # 1. State Validation
-    if length(model.omega) != 1
-        error("Multi-mode models are not yet implemented.")
-    end
-    if isempty(model.spin_boson_couplings)
-        error("Model requires at least 1 spin-boson coupling.")
-    end
+    validate(model, state_init.var_params)
 
     # 2. Setup Loop Variables
     psi = state_init.psi_spin

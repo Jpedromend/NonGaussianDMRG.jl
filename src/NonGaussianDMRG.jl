@@ -1,6 +1,6 @@
-module NGS
+module NonGaussianDMRG
 
-using ITensors, ITensorMPS, Optim, LinearAlgebra, Printf
+using ITensors, ITensorMPS, Optim, LinearAlgebra, Printf, Random
 
 # Load scripts
 include("types.jl")
@@ -14,7 +14,7 @@ include("observables.jl")
 export SpinBosonSystem, GS, HomogeneousNGS, NGSState, SolverStats
 
 # Builder Mutators
-export add_boson!, set_epsilon!, add_spin_coupling!, add_spin_boson_coupling!
+export add_boson!, set_epsilon!, add_spin_coupling!, add_spin_boson_coupling!, set_dicke_coupling!
 
 # Solver Methods
 export solve_ngs

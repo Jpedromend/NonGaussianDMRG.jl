@@ -3,10 +3,6 @@
 # --- Core Hierarchy ---
 abstract type AbstractSpinBosonModel end
 abstract type AbstractAnsatz end
-abstract type AbstractSolverBackend end
-
-# --- Numerical Backends ---
-struct DMRGBackend <: AbstractSolverBackend end
 
 # --- Explicit Interaction Graphs ---
 struct SpinCoupling
@@ -41,7 +37,7 @@ end
 """
 Adds a bosonic mode with frequency `w`. Returns the mode index.
 """
-function add_boson!(sys::SpinBosonSystem, w::Float64)
+function add_boson!(sys::SpinBosonSystem, w::Real)
     push!(sys.omega, w)
     return length(sys.omega)
 end
@@ -49,22 +45,36 @@ end
 """
 Sets the local splitting for a specific spin `i`.
 """
-function set_epsilon!(sys::SpinBosonSystem, i::Int, val::Float64)
+function set_epsilon!(sys::SpinBosonSystem, i::Int, val::Real)
     sys.epsilon[i] = val
 end
 
 """
 Adds a two-body spin interaction at sites `i` and `j`.
 """
-function add_spin_coupling!(sys::SpinBosonSystem, axis::Symbol, i::Int, j::Int, val::Float64)
+function add_spin_coupling!(sys::SpinBosonSystem, axis::Symbol, i::Int, j::Int, val::Real)
     push!(sys.spin_couplings, SpinCoupling(axis, i, j, val))
 end
 
 """
-Adds a spin-boson interaction at site `i` and mode `m`.
+Adds a bare spin-boson coupling: H ⊃ val * s^axis_i (a_m + a_m†).
 """
-function add_spin_boson_coupling!(sys::SpinBosonSystem, m::Int, axis::Symbol, i::Int, val::Float64)
+function add_spin_boson_coupling!(sys::SpinBosonSystem, m::Int, axis::Symbol, i::Int, val::Real)
     push!(sys.spin_boson_couplings, SpinBosonCoupling(m, axis, i, val))
+end
+
+"""
+Sets the Dicke coupling of the single bosonic mode: H ⊃ (2g/√N) Σ_i s^x_i (a + a†),
+with `g` independent of N. Replaces any existing spin-boson couplings.
+"""
+function set_dicke_coupling!(sys::SpinBosonSystem, g::Real)
+    isempty(sys.omega) && error("No bosonic mode: call add_boson! first.")
+    length(sys.omega) > 1 && error("The Dicke coupling is defined for a single bosonic mode.")
+
+    empty!(sys.spin_boson_couplings)
+    for i in 1:sys.N
+        add_spin_boson_coupling!(sys, 1, :x, i, 2 * g / sqrt(sys.N))
+    end
 end
 
 # --- Variational Manifolds ---

@@ -44,49 +44,84 @@ function build_base_operators(model::SpinBosonSystem)
 end
 
 """
-Computes pre-contracted spin scalars and correlation matrices.
-Evaluates transverse interaction energies strictly over the explicit coupling graph,
-scaling linearly with the number of edges rather than N^2.
+Coefficients of the homogeneous ansatz, shared by `energy_cost`, `effective_hamiltonian`
+and the observables. Uses the Dicke coupling g_b = 2g/√N.
+"""
+function coefficients(model::SpinBosonSystem, ansatz::Union{HomogeneousNGS, GS})
+    omega = model.omega[1]
+    g_b = model.spin_boson_couplings[1].val
+    xi, lmd = ansatz.xi, ansatz.lambda
+
+    K = g_b^2 / omega
+    C = exp(-2.0 * xi) * (lmd * g_b / omega)^2
+
+    return (
+        omega   = omega,
+        K       = K,
+        C       = C,
+        c_field = exp(-C / 2),
+        K_mf    = K * (1.0 - lmd)^2,
+        c_quad  = K * lmd * (lmd - 2.0),
+        c_plus  = 0.5 * (1.0 + exp(-2.0 * C)),
+        c_minus = 0.5 * (1.0 - exp(-2.0 * C))
+    )
+end
+
+"""
+Checks that the model has the structure HomogeneousNGS assumes:
+one bosonic mode and a uniform x-coupling on every site.
+"""
+function validate(model::SpinBosonSystem, ::HomogeneousNGS)
+    isempty(model.omega) && error("No bosonic mode: call add_boson! first.")
+    length(model.omega) > 1 && error("HomogeneousNGS currently supports a single bosonic mode.")
+
+    c = model.spin_boson_couplings
+    isempty(c) && error("No spin-boson coupling: use set_dicke_coupling!.")
+
+    uniform = sort([x.site for x in c]) == 1:model.N &&
+        all(x -> x.m == 1 && x.axis == :x && x.val == c[1].val, c)
+    uniform || error("HomogeneousNGS currently requires a uniform x-coupling on every site " *
+        "(use set_dicke_coupling!); site-resolved couplings are currently not supported.")
+    return nothing
+end
+
+
+"""
+Spin-sector averages ⟨·⟩_s entering the energy functional.
+Computes the full N×N correlation matrices.
 """
 function spin_averages(model::SpinBosonSystem, psi::MPS)
     exp_sz = expect(psi, "Sz")
     exp_sx = expect(psi, "Sx")
-    
-    avg_sz_tot = real(sum(exp_sz))
-    avg_sx_tot = real(sum(exp_sx))
-    
-    C_xx = correlation_matrix(psi, "Sx", "Sx")
-    C_yy = correlation_matrix(complex(psi), "Sy", "Sy")
-    C_zz = correlation_matrix(psi, "Sz", "Sz")
 
-    E_field = real(dot(model.epsilon, exp_sz))
-    sx2_tot = real(sum(C_xx))
+    corr_xx = correlation_matrix(psi, "Sx", "Sx")
+    corr_yy = correlation_matrix(complex(psi), "Sy", "Sy")
+    corr_zz = correlation_matrix(psi, "Sz", "Sz")
 
-    A, B, C, D, E_xx = 0.0, 0.0, 0.0, 0.0, 0.0
-    
+    E_xx, Jy_yy, Jy_zz, Jz_yy, Jz_zz = 0.0, 0.0, 0.0, 0.0, 0.0
+
     for coup in model.spin_couplings
         if coup.axis == :x
-            E_xx += coup.val * real(C_xx[coup.i, coup.j])
+            E_xx  += coup.val * real(corr_xx[coup.i, coup.j])
         elseif coup.axis == :y
-            A += coup.val * real(C_yy[coup.i, coup.j])
-            B += coup.val * real(C_zz[coup.i, coup.j])
+            Jy_yy += coup.val * real(corr_yy[coup.i, coup.j])
+            Jy_zz += coup.val * real(corr_zz[coup.i, coup.j])
         elseif coup.axis == :z
-            C += coup.val * real(C_yy[coup.i, coup.j])
-            D += coup.val * real(C_zz[coup.i, coup.j])
+            Jz_yy += coup.val * real(corr_yy[coup.i, coup.j])
+            Jz_zz += coup.val * real(corr_zz[coup.i, coup.j])
         end
     end
 
-    O_sum = A + B + C + D
-    O_diff = A - B - C + D
-
     return (
-        avg_sx_tot = avg_sx_tot,
-        avg_sz_tot = avg_sz_tot,
-        sx2_tot    = sx2_tot,
-        E_field    = E_field,
+        avg_sx_tot = real(sum(exp_sx)),
+        avg_sz_tot = real(sum(exp_sz)),
+        sx2_tot    = real(sum(corr_xx)),
+        E_field    = real(dot(model.epsilon, exp_sz)),
         E_xx       = E_xx,
-        O_sum      = O_sum,
-        O_diff     = O_diff
+        Jy_yy      = Jy_yy,
+        Jy_zz      = Jy_zz,
+        Jz_yy      = Jz_yy,
+        Jz_zz      = Jz_zz
     )
 end
 
@@ -94,21 +129,17 @@ end
 Evaluates the analytical variational energy functional for the Homogeneous non-Gaussian state.
 """
 function energy_cost(model::SpinBosonSystem, ansatz::HomogeneousNGS, obs)
-    omega = model.omega[1]
-    g = model.spin_boson_couplings[1].val 
-    
-    xi, lmd = ansatz.xi, ansatz.lambda
-    
-    K = (4.0 * g^2) / (model.N * omega)
-    eta = (2.0 / model.N) * exp(-2.0 * xi) * (lmd * g / omega)^2
+    co = coefficients(model, ansatz)
 
-    E_boson = omega * sinh(xi)^2
+    E_boson = co.omega * sinh(ansatz.xi)^2
 
-    E_sb = obs.E_field * exp(-eta) -
-           K * (1.0 - lmd)^2 * obs.avg_sx_tot^2 + 
-           K * lmd * (lmd - 2.0) * obs.sx2_tot
+    E_sb = co.c_field * obs.E_field -
+           co.K_mf * obs.avg_sx_tot^2 +
+           co.c_quad * obs.sx2_tot
 
-    E_ss = - obs.E_xx - 0.5 * obs.O_sum - 0.5 * exp(-4.0 * eta) * obs.O_diff
+    E_ss = - obs.E_xx -
+           co.c_plus  * (obs.Jy_yy + obs.Jz_zz) -
+           co.c_minus * (obs.Jy_zz + obs.Jz_yy)
 
     return E_boson + E_sb + E_ss
 end
@@ -119,20 +150,10 @@ with the updated dressing parameters. The tensor network MPO is compiled
 strictly once per optimization step here.
 """
 function effective_hamiltonian(base_ops, model::SpinBosonSystem, ansatz::HomogeneousNGS, avg_sx, sites; cutoff=1e-12)
-    omega = model.omega[1]
-    g = model.spin_boson_couplings[1].val 
-    
-    xi, lmd = ansatz.xi, ansatz.lambda
-
-    K = (4.0 * g^2) / (model.N * omega)
-    eta = (2.0 / model.N) * exp(-2.0 * xi) * (lmd * g / omega)^2
-
-    c_field = exp(-eta)
-    c_mf    = -2.0 * K * (1.0 - lmd)^2 * avg_sx
-    c_quad  = K * lmd * (lmd - 2.0)
-    
-    c_plus  = 0.5 * (1.0 + exp(-4.0 * eta))
-    c_minus = 0.5 * (1.0 - exp(-4.0 * eta))
+    co = coefficients(model, ansatz)
+    c_field, c_quad = co.c_field, co.c_quad
+    c_plus, c_minus = co.c_plus, co.c_minus
+    c_mf = -2.0 * co.K_mf * avg_sx
 
     total_os = c_field * base_ops.Hz +
                c_mf * base_ops.Hx +
