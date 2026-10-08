@@ -77,10 +77,11 @@ end
 # --- Internal Engine ---
 
 """
-Engine for the self-consistent protocol using DMRG.
-Absorbs standard ITensors arguments (nsweeps, maxdim, observer, etc.) via dmrg_kwargs.
-`minsweeps_schedule` (with an `observer`) sets the observer's `minsweeps` per outer iteration:
-entry k for iteration k, the last entry for all later ones, e.g. [10, 2].
+Self-consistent loop: DMRG for the spin state, then optimization of (xi, lambda), until the energy
+changes by less than `tol`. Other keywords are passed to `dmrg`.
+`minsweeps_schedule`: the observer's `minsweeps` per iteration, the last entry repeating.
+`max_stalled_iter`: if > 0, stop after that many iterations without lowering the lowest energy by
+more than `tol`, returning the lowest-energy state.
 """
 function _solve(model::SpinBosonSystem, state_init::NGSState{HomogeneousNGS};
                 sites,
@@ -93,6 +94,7 @@ function _solve(model::SpinBosonSystem, state_init::NGSState{HomogeneousNGS};
                 outputlevel=1,
                 mpo_cutoff=1e-12,
                 minsweeps_schedule=nothing,
+                max_stalled_iter=0,
                 dmrg_kwargs...)
 
     # 1. State Validation
@@ -111,6 +113,9 @@ function _solve(model::SpinBosonSystem, state_init::NGSState{HomogeneousNGS};
     prev_E0 = Inf
     E0 = energy_cost(model, HomogeneousNGS(vparams_opt[1], vparams_opt[2]), spin_obs)
 
+    best = (E=E0, psi=psi, vparams=copy(vparams_opt))
+    stalled = 0
+
     # 3. Self-Consistent Loop
     for iter in 1:max_iter
         if iter > min_iter && abs(E0 - prev_E0) < tol
@@ -122,13 +127,22 @@ function _solve(model::SpinBosonSystem, state_init::NGSState{HomogeneousNGS};
             break
         end
 
+        if max_stalled_iter > 0 && iter > min_iter && stalled >= max_stalled_iter
+            if outputlevel >= 1
+                @printf("Stalled at step %3d, best E = %.8f\n", iter - 1, best.E)
+            end
+            E0, psi, vparams_opt = best.E, best.psi, best.vparams
+            final_iter = iter - 1
+            break
+        end
+
         if outputlevel >= 1
             @printf("Step %3d | E = %.8f | dE = %.2e | xi = %.4f | lam = %.4f\n",
                     iter, E0, abs(E0-prev_E0), vparams_opt[1], vparams_opt[2])
         end
         prev_E0 = E0
 
-        # Fresh observer with the scheduled minsweeps, or reset of the given one
+        # Observer: new one with the scheduled minsweeps, or reset of the given one
         dmrg_kw = dmrg_kwargs
         if !isnothing(minsweeps_schedule)
             _obs = dmrg_kwargs[:observer]
@@ -156,6 +170,11 @@ function _solve(model::SpinBosonSystem, state_init::NGSState{HomogeneousNGS};
             E0 = Optim.minimum(res)
         else
             E0 = energy_cost(model, HomogeneousNGS(vparams_opt[1], vparams_opt[2]), spin_obs)
+        end
+
+        stalled = E0 < best.E - tol ? 0 : stalled + 1
+        if E0 < best.E
+            best = (E=E0, psi=psi, vparams=copy(vparams_opt))
         end
 
         if return_stats
