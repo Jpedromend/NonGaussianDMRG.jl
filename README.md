@@ -128,7 +128,22 @@ avg_sz_tot = sum(expect_ngs("Sz", state_ngs, sys))
 println("Converged in $(stats.iterations) iterations.")
 ```
 
-Keywords not used by the package itself (`nsweeps`, `maxdim`, `cutoff`, `observer`, ...) are passed directly to `ITensorMPS.dmrg`, and `state_ngs.psi_spin` is an ITensorMPS `MPS`; see the [ITensorMPS.jl](https://github.com/ITensor/ITensorMPS.jl) documentation.
+The self-consistent loop is controlled by `max_iter` (default 250), `min_iter` (1), `tol` (1e-8, the energy change between outer iterations that counts as converged), `max_stalled_iter` (off by default; if > 0, the loop stops after that many iterations without lowering the lowest energy by more than `tol` and returns the lowest-energy state), `mpo_cutoff` (1e-12, the compression cutoff of the effective-Hamiltonian MPO), `return_stats` and `outputlevel`. All other keywords (`nsweeps`, `maxdim`, `cutoff`, `noise`, `observer`, ...) are passed to `ITensorMPS.dmrg` in every outer iteration. A `DMRGObserver` passed as `observer` is reset before each DMRG call, so its `minsweeps` and `energy_tol` apply to each outer iteration separately. `state_ngs.psi_spin` is an ITensorMPS `MPS`; see the [ITensorMPS.jl](https://github.com/ITensor/ITensorMPS.jl) documentation.
+
+### Different settings for the first outer iteration
+
+The first outer iteration starts from a random MPS, the later ones from a converged state. To give them different DMRG settings, run the first iteration alone and continue from its result:
+
+```julia
+using ITensorMPS: DMRGObserver
+
+E0, state = solve_ngs(sys; seed=1234, max_iter=1, nsweeps=50, maxdim=[20, 50, 100, 200], cutoff=1e-10,
+                      observer=DMRGObserver(energy_tol=1e-8, minsweeps=10))
+E0, state = solve_ngs(sys, state; nsweeps=100, maxdim=[200], cutoff=1e-10,
+                      observer=DMRGObserver(energy_tol=1e-8, minsweeps=2))
+```
+
+The second call applies the same convergence and stall tests as a single run would from its second iteration on.
 
 ### Gaussian baseline
 
@@ -166,7 +181,7 @@ A warm start from a `GS` result keeps $\lambda = \xi = 0$ fixed; to continue in 
   * `src/`: Source code for the library.
       * `NonGaussianDMRG.jl`: Main module definition and exports.
       * `types.jl`: Core abstract hierarchy, the `SpinBosonSystem` graph builder and its mutators, variational manifolds (`GS`, `HomogeneousNGS`), and the unified `NGSState`.
-      * `physics.jl`: Analytical operator sums, ansatz coefficients and model validation, the effective Hamiltonian, and the energy functional.
+      * `physics.jl`: Operator sums of the model and their MPOs (built once per solve), ansatz coefficients and model validation, the effective Hamiltonian, the spin-sector averages, and the energy functional.
       * `solver.jl`: The self-consistent optimization loop, cold/warm start dispatch, and the DMRG engine.
       * `observables.jl`: `expect_ngs` and `correlation_matrix_ngs`, with the ansatz dressing applied analytically.
   * `notebooks/`: A standalone, step-by-step implementation of the method for the Dicke model.
@@ -175,9 +190,9 @@ A warm start from a `GS` result keeps $\lambda = \xi = 0$ fixed; to continue in 
 
 Future versions target the general spin-boson Hamiltonian with $N$ spins and $M$ bosonic modes,
 
-$$H = \sum_{m=1}^{M} \omega_m a_m^\dagger a_m + \sum_{i=1}^{N} \varepsilon_i s_i^z + \sum_{i=1}^{N}\sum_{m=1}^{M} g_{im} s_i^\mu (a_m + a_m^\dagger) - \sum_{i\ltj} \sum_{\gamma\in\lbrace x,y,z \rbrace} J_{ij}^\gamma s_i^\gamma s_j^\gamma ,$$
+$$H = \sum_{m=1}^{M} \omega_m a_m^\dagger a_m + \sum_{i=1}^{N} \varepsilon_i s_i^z + \sum_{i=1}^{N}\sum_{m=1}^{M} g_{im} s_i^\mu (a_m + a_m^\dagger) - \sum_{i\lt j} \sum_{\gamma\in\lbrace x,y,z \rbrace} J_{ij}^\gamma s_i^\gamma s_j^\gamma ,$$
 
-with a fixed coupling axis $\mu \in \{x, y, z\}$ and couplings $g_{im}$, $J_{ij}^\gamma$ that may be inhomogeneous, disordered, or long-ranged. The corresponding ansatz keeps the structure $|\psi_{\rm NGS}\rangle = U_{\lambda} ( U_{\mathrm{GS}} |0\rangle_{\rm b}\otimes|\phi\rangle_{\rm s} )$, with a multimode Gaussian layer
+with a fixed coupling axis $\mu \in \lbrace x, y, z \rbrace$ and couplings $g_{im}$, $J_{ij}^\gamma$ that may be inhomogeneous, disordered, or long-ranged. The corresponding ansatz keeps the structure $|\psi_{\rm NGS}\rangle = U_{\lambda} ( U_{\mathrm{GS}} |0\rangle_{\rm b}\otimes|\phi\rangle_{\rm s} )$, with a multimode Gaussian layer
 
 $$U_{\mathrm{GS}} = \exp\left(i R^T \sigma \Delta_R\right) \exp\left(-\frac{i}{2} R^T \xi R\right), \qquad R = (x_1, \dots, x_M, p_1, \dots, p_M)^T,$$
 

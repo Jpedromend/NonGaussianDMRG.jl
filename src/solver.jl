@@ -10,7 +10,7 @@ function solve_ngs(model::SpinBosonSystem; seed=nothing, maxdim_init=10, kwargs.
     seed === nothing || Random.seed!(seed)
 
     sites = siteinds("S=1/2", model.N)
-    psi_init = randomMPS(sites; linkdims=maxdim_init)
+    psi_init = random_mps(sites; linkdims=maxdim_init)
 
     # Random guesses for the non-Gaussian parameters
     xi_guess = rand(0.0:0.01:0.1)
@@ -28,7 +28,7 @@ function solve_ngs(model::SpinBosonSystem, ::GS; seed=nothing, maxdim_init=10, k
     seed === nothing || Random.seed!(seed)
 
     sites = siteinds("S=1/2", model.N)
-    psi_init = randomMPS(sites; linkdims=maxdim_init)
+    psi_init = random_mps(sites; linkdims=maxdim_init)
     state_init = NGSState(psi_init, GS())
 
     return solve_ngs(model, state_init; kwargs...)
@@ -79,7 +79,6 @@ end
 """
 Self-consistent loop: DMRG for the spin state, then optimization of (xi, lambda), until the energy
 changes by less than `tol`. Other keywords are passed to `dmrg`.
-`minsweeps_schedule`: the observer's `minsweeps` per iteration, the last entry repeating.
 `max_stalled_iter`: if > 0, stop after that many iterations without lowering the lowest energy by
 more than `tol`, returning the lowest-energy state.
 """
@@ -93,7 +92,6 @@ function _solve(model::SpinBosonSystem, state_init::NGSState{HomogeneousNGS};
                 return_stats=false,
                 outputlevel=1,
                 mpo_cutoff=1e-12,
-                minsweeps_schedule=nothing,
                 max_stalled_iter=0,
                 dmrg_kwargs...)
 
@@ -104,7 +102,8 @@ function _solve(model::SpinBosonSystem, state_init::NGSState{HomogeneousNGS};
     psi = state_init.psi_spin
     vparams_opt = [state_init.var_params.xi, state_init.var_params.lambda]
 
-    spin_obs = spin_averages(model, psi)
+    mpos = build_base_mpos(base_ops, sites)
+    spin_obs = spin_averages(mpos, psi)
 
     converged = false
     final_iter = max_iter
@@ -142,27 +141,21 @@ function _solve(model::SpinBosonSystem, state_init::NGSState{HomogeneousNGS};
         end
         prev_E0 = E0
 
-        # Observer: new one with the scheduled minsweeps, or reset of the given one
-        dmrg_kw = dmrg_kwargs
-        if !isnothing(minsweeps_schedule)
-            _obs = dmrg_kwargs[:observer]
-            new_obs = DMRGObserver(_obs.ops, _obs.sites; energy_tol=_obs.etol,
-                                   minsweeps=minsweeps_schedule[min(iter, end)])
-            dmrg_kw = merge(values(dmrg_kwargs), (observer=new_obs,))
-        elseif haskey(dmrg_kwargs, :observer)
+        # Observer reset, so its stopping test only sees the sweeps of this DMRG call
+        if haskey(dmrg_kwargs, :observer)
             _obs = dmrg_kwargs[:observer]
             hasproperty(_obs, :energies) && empty!(_obs.energies)
             hasproperty(_obs, :truncerrs) && empty!(_obs.truncerrs)
         end
 
-        # Assemble MPO using dynamically instantiated parameters
-        H_eff = effective_hamiltonian(base_ops, model, HomogeneousNGS(vparams_opt[1], vparams_opt[2]), spin_obs.avg_sx_tot, sites; cutoff=mpo_cutoff)
+        # Effective Hamiltonian from the prebuilt MPOs and the current coefficients
+        H_eff = effective_hamiltonian(mpos, model, HomogeneousNGS(vparams_opt[1], vparams_opt[2]), spin_obs.avg_sx_tot; cutoff=mpo_cutoff)
 
         # Run ITensors DMRG
-        E0, psi = dmrg(H_eff, psi; outputlevel=outputlevel, dmrg_kw...)
+        E0, psi = dmrg(H_eff, psi; outputlevel=outputlevel, dmrg_kwargs...)
 
         # Optimize Bosonic Parameters
-        spin_obs = spin_averages(model, psi)
+        spin_obs = spin_averages(mpos, psi)
         if optimize_params
             cost_fn(x) = energy_cost(model, HomogeneousNGS(x[1], x[2]), spin_obs)
             res = optimize(cost_fn, vparams_opt, LBFGS(), Optim.Options(iterations=100))

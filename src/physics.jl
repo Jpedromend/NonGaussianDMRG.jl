@@ -1,30 +1,26 @@
 # src/physics.jl
 
 """
-Precompiles the ITensor OpSums to avoid redundancies.
-Returns purely analytical operator sums; no tensor 
-networks are instantiated here.
+Builds the ITensor OpSums of the model pieces. Returns purely analytical operator sums;
+no tensor networks are instantiated here.
 """
 function build_base_operators(model::SpinBosonSystem)
     N = model.N
-    
+
     os_z = OpSum()
     for i in 1:N
         if abs(model.epsilon[i]) > 1e-14
             os_z += model.epsilon[i], "Sz", i
         end
     end
-    
-    os_x, os_x2 = OpSum(), OpSum()
+
+    os_x = OpSum()
     for i in 1:N
         os_x += 1.0, "Sx", i
-        for j in 1:N
-            os_x2 += 1.0, "Sx", i, "Sx", j
-        end
     end
-    
+
     os_Jx, os_Jy_y, os_Jy_z, os_Jz_z, os_Jz_y = OpSum(), OpSum(), OpSum(), OpSum(), OpSum()
-    
+
     for c in model.spin_couplings
         if c.axis == :x
             os_Jx += c.val, "Sx", c.i, "Sx", c.j
@@ -38,8 +34,23 @@ function build_base_operators(model::SpinBosonSystem)
     end
 
     return (
-        Hz = os_z, Hx = os_x, Hx2 = os_x2,
+        Hz = os_z, Hx = os_x,
         HJx = os_Jx, HJy_y = os_Jy_y, HJy_z = os_Jy_z, HJz_z = os_Jz_z, HJz_y = os_Jz_y
+    )
+end
+
+"""
+MPOs of the base operator sums, built once per solve; `nothing` for an empty sum.
+Hx2 = (S^x)^2 is the square of the S^x MPO.
+"""
+function build_base_mpos(base_ops, sites)
+    mpo(os) = length(os) == 0 ? nothing : MPO(os, sites)
+    Hx = mpo(base_ops.Hx)
+
+    return (
+        Hz = mpo(base_ops.Hz), Hx = Hx, Hx2 = apply(Hx, Hx; cutoff=1e-15),
+        HJx = mpo(base_ops.HJx), HJy_y = mpo(base_ops.HJy_y), HJy_z = mpo(base_ops.HJy_z),
+        HJz_z = mpo(base_ops.HJz_z), HJz_y = mpo(base_ops.HJz_y)
     )
 end
 
@@ -87,41 +98,20 @@ end
 
 
 """
-Spin-sector averages ⟨·⟩_s entering the energy functional.
-Computes the full N×N correlation matrices.
+Spin-sector averages ⟨·⟩_s entering the energy functional, as expectation values of the base MPOs.
 """
-function spin_averages(model::SpinBosonSystem, psi::MPS)
-    exp_sz = expect(psi, "Sz")
-    exp_sx = expect(psi, "Sx")
-
-    corr_xx = correlation_matrix(psi, "Sx", "Sx")
-    corr_yy = correlation_matrix(complex(psi), "Sy", "Sy")
-    corr_zz = correlation_matrix(psi, "Sz", "Sz")
-
-    E_xx, Jy_yy, Jy_zz, Jz_yy, Jz_zz = 0.0, 0.0, 0.0, 0.0, 0.0
-
-    for coup in model.spin_couplings
-        if coup.axis == :x
-            E_xx  += coup.val * real(corr_xx[coup.i, coup.j])
-        elseif coup.axis == :y
-            Jy_yy += coup.val * real(corr_yy[coup.i, coup.j])
-            Jy_zz += coup.val * real(corr_zz[coup.i, coup.j])
-        elseif coup.axis == :z
-            Jz_yy += coup.val * real(corr_yy[coup.i, coup.j])
-            Jz_zz += coup.val * real(corr_zz[coup.i, coup.j])
-        end
-    end
+function spin_averages(mpos, psi::MPS)
+    ev(M) = isnothing(M) ? 0.0 : real(inner(psi', M, psi))
 
     return (
-        avg_sx_tot = real(sum(exp_sx)),
-        avg_sz_tot = real(sum(exp_sz)),
-        sx2_tot    = real(sum(corr_xx)),
-        E_field    = real(dot(model.epsilon, exp_sz)),
-        E_xx       = E_xx,
-        Jy_yy      = Jy_yy,
-        Jy_zz      = Jy_zz,
-        Jz_yy      = Jz_yy,
-        Jz_zz      = Jz_zz
+        avg_sx_tot = ev(mpos.Hx),
+        sx2_tot    = ev(mpos.Hx2),
+        E_field    = ev(mpos.Hz),
+        E_xx       = ev(mpos.HJx),
+        Jy_yy      = ev(mpos.HJy_y),
+        Jy_zz      = ev(mpos.HJy_z),
+        Jz_yy      = ev(mpos.HJz_y),
+        Jz_zz      = ev(mpos.HJz_z)
     )
 end
 
@@ -145,24 +135,34 @@ function energy_cost(model::SpinBosonSystem, ansatz::HomogeneousNGS, obs)
 end
 
 """
-Assembles the effective spin Hamiltonian by scaling the pre-built OpSums 
-with the updated dressing parameters. The tensor network MPO is compiled 
-strictly once per optimization step here.
+Assembles the effective spin Hamiltonian as the sum of the base MPOs scaled by the current
+coefficients (direct sum, then SVD compression with `cutoff`). Empty pieces are left out.
+The compression leaves the whole operator norm on one tensor; it is spread back as a factor
+sqrt(2) per site, the weight of the spin-1/2 identity, so the tensors have the scale of an
+OpSum-built MPO (the DMRG noise term depends on this scale).
 """
-function effective_hamiltonian(base_ops, model::SpinBosonSystem, ansatz::HomogeneousNGS, avg_sx, sites; cutoff=1e-12)
+function effective_hamiltonian(mpos, model::SpinBosonSystem, ansatz::HomogeneousNGS, avg_sx; cutoff=1e-12)
     co = coefficients(model, ansatz)
-    c_field, c_quad = co.c_field, co.c_quad
-    c_plus, c_minus = co.c_plus, co.c_minus
-    c_mf = -2.0 * co.K_mf * avg_sx
 
-    total_os = c_field * base_ops.Hz +
-               c_mf * base_ops.Hx +
-               c_quad * base_ops.Hx2 -
-               1.0 * base_ops.HJx -
-               c_plus * base_ops.HJy_y -
-               c_minus * base_ops.HJy_z -
-               c_plus * base_ops.HJz_z -
-               c_minus * base_ops.HJz_y
-            
-    return MPO(total_os, sites; cutoff=cutoff)
+    terms = (
+        (co.c_field,               mpos.Hz),
+        (-2.0 * co.K_mf * avg_sx,  mpos.Hx),
+        (co.c_quad,                mpos.Hx2),
+        (-1.0,                     mpos.HJx),
+        (-co.c_plus,               mpos.HJy_y),
+        (-co.c_minus,              mpos.HJy_z),
+        (-co.c_plus,               mpos.HJz_z),
+        (-co.c_minus,              mpos.HJz_y)
+    )
+    H = [c * M for (c, M) in terms if !isnothing(M)]
+
+    H_eff = truncate!(+(H...; alg="directsum"); cutoff=cutoff)
+
+    oc, f = orthocenter(H_eff), sqrt(2.0)
+    for j in eachindex(H_eff)
+        j == oc || (H_eff[j] *= f)
+    end
+    H_eff[oc] /= f^(length(H_eff) - 1)
+
+    return H_eff
 end
