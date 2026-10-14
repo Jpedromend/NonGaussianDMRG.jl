@@ -21,17 +21,20 @@ function build_base_operators(model::SpinBosonSystem)
 
     os_Jx, os_Jy_y, os_Jy_z, os_Jz_z, os_Jz_y = OpSum(), OpSum(), OpSum(), OpSum(), OpSum()
 
+    ### addition/change for the optimization test ###
+    # Sy_i Sy_j = -(iSy_i)(iSy_j), with the real operator iSy = i Sy, so H_eff and the MPS stay real
     for c in model.spin_couplings
         if c.axis == :x
             os_Jx += c.val, "Sx", c.i, "Sx", c.j
         elseif c.axis == :y
-            os_Jy_y += c.val, "Sy", c.i, "Sy", c.j
+            os_Jy_y += -c.val, "iSy", c.i, "iSy", c.j
             os_Jy_z += c.val, "Sz", c.i, "Sz", c.j
         elseif c.axis == :z
             os_Jz_z += c.val, "Sz", c.i, "Sz", c.j
-            os_Jz_y += c.val, "Sy", c.i, "Sy", c.j
+            os_Jz_y += -c.val, "iSy", c.i, "iSy", c.j
         end
     end
+    ##########
 
     return (
         Hz = os_z, Hx = os_x,

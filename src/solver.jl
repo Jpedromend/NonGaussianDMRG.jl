@@ -1,5 +1,10 @@
 # src/solver.jl
 
+### addition/change for the optimization test ###
+const SX_SLOPE_MAX = 0.995    # largest slope used: extrapolation factor 1 / (1 - slope) up to 200
+const SX_SETTLED   = 0.05     # largest relative change of 1 - slope between two iterations
+##########
+
 # --- Top Level Dispatch ---
 
 """
@@ -93,6 +98,10 @@ function _solve(model::SpinBosonSystem, state_init::NGSState{HomogeneousNGS};
                 outputlevel=1,
                 mpo_cutoff=1e-12,
                 max_stalled_iter=0,
+                ### addition/change for the optimization test ###
+                extrapolate_sx=false,
+                jump_kwargs=(;),
+                ##########
                 dmrg_kwargs...)
 
     # 1. State Validation
@@ -104,6 +113,11 @@ function _solve(model::SpinBosonSystem, state_init::NGSState{HomogeneousNGS};
 
     mpos = build_base_mpos(base_ops, sites)
     spin_obs = spin_averages(mpos, psi)
+
+    ### addition/change for the optimization test ###
+    sx_in = spin_obs.avg_sx_tot
+    sx_in_prev, sx_out_prev, slope_prev, jumped = NaN, NaN, NaN, false
+    ##########
 
     converged = false
     final_iter = max_iter
@@ -141,18 +155,23 @@ function _solve(model::SpinBosonSystem, state_init::NGSState{HomogeneousNGS};
         end
         prev_E0 = E0
 
+        ### addition/change for the optimization test ###
+        # After an extrapolation, the keywords of jump_kwargs replace those of dmrg_kwargs in this DMRG call
+        kw = jumped ? merge(values(dmrg_kwargs), jump_kwargs) : dmrg_kwargs
+
         # Observer reset, so its stopping test only sees the sweeps of this DMRG call
-        if haskey(dmrg_kwargs, :observer)
-            _obs = dmrg_kwargs[:observer]
+        if haskey(kw, :observer)
+            _obs = kw[:observer]
             hasproperty(_obs, :energies) && empty!(_obs.energies)
             hasproperty(_obs, :truncerrs) && empty!(_obs.truncerrs)
         end
 
-        # Effective Hamiltonian from the prebuilt MPOs and the current coefficients
-        H_eff = effective_hamiltonian(mpos, model, HomogeneousNGS(vparams_opt[1], vparams_opt[2]), spin_obs.avg_sx_tot; cutoff=mpo_cutoff)
+        # Effective Hamiltonian from the prebuilt MPOs, the current coefficients and the <S^x> input
+        H_eff = effective_hamiltonian(mpos, model, HomogeneousNGS(vparams_opt[1], vparams_opt[2]), sx_in; cutoff=mpo_cutoff)
 
         # Run ITensors DMRG
-        E0, psi = dmrg(H_eff, psi; outputlevel=outputlevel, dmrg_kwargs...)
+        E0, psi = dmrg(H_eff, psi; outputlevel=outputlevel, kw...)
+        ##########
 
         # Optimize Bosonic Parameters
         spin_obs = spin_averages(mpos, psi)
@@ -169,6 +188,18 @@ function _solve(model::SpinBosonSystem, state_init::NGSState{HomogeneousNGS};
         if E0 < best.E
             best = (E=E0, psi=psi, vparams=copy(vparams_opt))
         end
+
+        ### addition/change for the optimization test ###
+        # Next <S^x> input: the measured output, or, once the slope of the map in -> out has settled, the fixed
+        # point of the line through the last two (in, out) pairs; set to 0 if that flips the sign
+        sx_out = spin_obs.avg_sx_tot
+        slope = (sx_out - sx_out_prev) / (sx_in - sx_in_prev)
+        jumped = extrapolate_sx && 0 < slope <= SX_SLOPE_MAX && abs((1 - slope) / (1 - slope_prev) - 1) < SX_SETTLED
+        sx_in_prev, sx_out_prev, slope_prev = sx_in, sx_out, slope
+        sx_in = jumped ? (sx_out - slope * sx_in) / (1 - slope) : sx_out
+        jumped && sx_in * sx_out < 0 && (sx_in = 0.0)
+        jumped && outputlevel >= 1 && @printf("Extrapolated <Sx> = %.6f (slope %.4f)\n", sx_in, slope)
+        ##########
 
         if return_stats
             push!(energy_history, E0)
